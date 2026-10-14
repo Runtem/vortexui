@@ -1,3 +1,6 @@
+
+
+
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -15,6 +18,7 @@ local StaticText = {}
 
 local Module = ReplicatedStorage:WaitForChild("Fonts")
 local Fonts = require(Module)
+local ColorModule=require(ReplicatedStorage:WaitForChild("ColorModule"))
 
 local SendBillboards = ReplicatedStorage:WaitForChild("SendBillboards") :: RemoteEvent
 
@@ -28,6 +32,145 @@ export type FontProps = {
 	rotation: Vector3?,
 	align: ("left" | "center" | "right")?,
 }
+
+-- effects = { [string] = { open = function(args, props), close = function(args, props) } }
+-- open = <MARKUPID=arg>
+-- close = </MARKUPID>
+local effects = {
+	color = {
+		open = function(args, props) 
+			local hex = args[1]
+			if hex then 
+				hex = hex:gsub("^#", "") 
+					props.Color = ColorModule.fromHex(hex) 
+			end 
+		end,
+		close = function(args, props)
+			props.Color = nil  
+		end,
+	}, 
+	size = {
+		open = function(args, props) 
+			local number = tonumber(args[1])
+			if number then 
+			    props.Size=number
+
+			end 
+		end,
+		close = function(args, props)
+			    props.Size=nil
+		end,
+	}, 
+	font = {
+		open = function(args, props) 
+			local font = args[1]
+			if number then 
+			    props.Font=font
+
+			end 
+		end,
+		close = function(args, props)
+			    props.Font=nil
+		end,
+	}, 
+	transparency = {
+		open = function(args, props) 
+			local number = tonumber(args[1])
+			if number then 
+			    props.Transparency=number
+
+			end 
+		end,
+		close = function(args, props)
+			    props.Transparency=nil
+		end,
+	}, 
+}
+
+local function parse_tag(tag)
+	local is_closing = tag:sub(1, 1) == "/"
+	if is_closing then
+		tag = tag:sub(2)
+	end
+	
+	local name, argstr = tag:match("^(%w+)[=:]?(.*)$")
+	if not name then return nil end
+
+	local args = {}
+	if argstr and argstr ~= "" then
+		for a in argstr:gmatch("[^,;%s]+") do
+			table.insert(args, a)
+		end
+	end
+
+	return {
+		name = name:lower(),
+		args = args,
+		closing = is_closing,
+	}
+end
+
+-- Returns a list of segments: { text = "...", props = { any } }
+local function parse_rich_text(input)
+	local segments = {}
+	local active = {}         
+	local currentProps = {}    -- current property table
+
+	local function push_segment(text)
+		if text == "" then return end
+		-- deep-ish copy  
+		local propsCopy = {}
+		for k, v in pairs(currentProps) do
+			propsCopy[k] = v
+		end
+		table.insert(segments, {
+			text = text,
+			props = propsCopy,
+		})
+	end
+
+	local pos = 1
+	while pos <= #input do
+		local tag_start, tag_end, tag_content = input:find("<(.-)>", pos)
+
+		if not tag_start then
+			push_segment(input:sub(pos))
+			break
+		end
+ 
+		if tag_start > pos then
+			push_segment(input:sub(pos, tag_start - 1))
+		end
+
+		local tag = parse_tag(tag_content)
+		if tag then
+			local effect = effects[tag.name]
+			if effect then
+				if tag.closing then -- on </MARKUPID>
+					for i = #active, 1, -1 do
+						if active[i].name == tag.name then 
+							effect.close(active[i].args, currentProps) -- run close() function
+							table.remove(active, i)
+							break
+						end
+					end
+				else  -- on <MARKUPID=args>
+					effect.open(tag.args, currentProps)
+					table.insert(active, {
+						name = tag.name,
+						args = tag.args,
+						effect = effect,
+					})
+				end
+			end
+		end
+
+		pos = tag_end + 1
+	end
+
+	return segments
+end
+
 
 local function createBlock(cframe: CFrame, size: Vector3, color: Color3, parent: Instance)
 	local block = Instance.new("Part")
@@ -78,40 +221,75 @@ function VortexFont:DisplayText(props: FontProps, text: string, isBillboard: boo
 	local alignment = props.align or "left"
 	local pixelSize = (props.pixelSize or PIXEL_SIZE) / Fonts[font].content_height
 
-	local characters = string.split(string.upper(text), "")
+	local characters = string.split( text , "")
 	local font_dir = Fonts[font].characters
 
 	local totalWidth, characterWidths = calculateTotalWidth(characters, font_dir)
 
 	local alignOffset = 0
+	 
+	local rotCFrame = CFrame.fromEulerAnglesXYZ(rot.X, rot.Y, rot.Z)  
+	local segments = {{
+			text = text,
+			props = {},
+			}}
+			if props.richtext then
+			    segments=parse_rich_text(text)
+			   end
+  
+	local allCharacters = {}
+	for _, seg in ipairs(segments) do
+		for char in seg.text:gmatch(".") do
+			table.insert(allCharacters, char)
+		end
+	end
+
+	totalWidth, characterWidths = calculateTotalWidth(allCharacters, font_dir)
+
 	if alignment == "center" then
 		alignOffset = totalWidth / 2
 	elseif alignment == "right" then
 		alignOffset = totalWidth
 	end
-	local rotCFrame = CFrame.fromEulerAnglesXYZ(rot.X, rot.Y, rot.Z)
+
 	local textGlyphs = {}
 	local letterX = 0
-	for i, char in characters do
-		local glyph = font_dir[char]
-		if glyph then
-			for rowIndex, row in glyph do
-				local y = #glyph - rowIndex - countBaselineRows(glyph) + 0.5
+	local charIndex = 0  
 
-				for start, run in string.gmatch(row, "()([#@]+)") do
-					local x = letterX + (start - 1) + #run / 2 - alignOffset
-					local offset = Vector3.new(x, y, 0) * pixelSize
-					local worldPos = props.origin + rotCFrame * offset
-					local cframe = CFrame.new(worldPos) * rotCFrame.Rotation
-					local size = Vector3.new(#run, 1, 1) * pixelSize
+	for _, segment in ipairs(segments) do
+		local segmentColor = segment.props.Color or color
+		-- local segmentSize = segment.props.Size or pixelSize --idk how to calculate ts :(
+		local segmentTransparency = segment.props.Transparency or 0
+		-- local segmentFont = segment.props.Font or font --idk how to calculate ts :(
 
-					table.insert(textGlyphs, createBlock(cframe, size, color, workspace))
-				end
+		for char in segment.text:gmatch(".") do
+			charIndex += 1
+			local glyph = font_dir[char] 
+			-- or DEFAULT_FONT[char] --fallback to the default font that has the character
+			-- or font_dir['¿'] or DEFAULT_FONT['¿'] -- no character symbol t --idk how to calculate ts :(
+			
+			if glyph then
+				for rowIndex, row in glyph do
+					local y = #glyph - rowIndex - countBaselineRows(glyph) + 0.5
+
+					for start, run in string.gmatch(row, "()([#@]+)") do
+						local x = letterX + (start - 1) + #run / 2 - alignOffset
+						local offset = Vector3.new(x, y, 0) * pixelSize
+						local worldPos = props.origin + rotCFrame * offset
+						local cframe = CFrame.new(worldPos) * rotCFrame.Rotation
+						local size = Vector3.new(#run, 1, 1) * pixelSize
+
+						local Block=createBlock(cframe, size, segmentColor, workspace)
+						Block.Transparency=segmentTransparency--might want to migrate this to createblock()
+						
+						table.insert(textGlyphs, Block)
+					end
+					end 
 			end
+			letterX += characterWidths[charIndex] + LETTER_GAP
 		end
-		letterX += characterWidths[i] + LETTER_GAP
 	end
-
+    
 	return textGlyphs
 end
 
